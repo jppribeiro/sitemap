@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"net/url"
 	"sitemap/internal"
 )
 
@@ -23,9 +24,20 @@ func Start() {
 	fmt.Printf("Got config %v\n", prop)
 	pool := internal.NewExecutor(prop.parallelism)
 
-	mapper := internal.NewSiteMapper(prop.url, prop.maxDepth, pool, make(chan internal.Url))
+	u, err := url.Parse(prop.url)
 
-	pool.Queue(mapper)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	mapper := internal.NewSiteMapper(u, prop.maxDepth, pool, make(chan internal.Url))
+
+	err = pool.Queue(mapper)
+
+	if err != nil {
+		fmt.Println(err.Error())
+	}
 
 	fmt.Println("Waiting\n")
 	results := mapper.Wait()

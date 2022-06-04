@@ -3,105 +3,131 @@ package internal
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"sitemap/internal/parser"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
+var client = http.Client{Timeout: time.Second * 10}
+
 type SiteMapper struct {
-	Url string
+	Url *url.URL
 	Depth uint
 	MaxDepth uint
 	Pool *Executor
 	Result chan Url
 
-	expectedLeavesCounter chan int
-	leafCounter chan int
+	node chan int32
 }
 
-func NewSiteMapper(url string, maxDepth uint, pool *Executor, resultChannel chan Url) *SiteMapper {
+func NewSiteMapper(url *url.URL, maxDepth uint, pool *Executor, resultChannel chan Url) *SiteMapper {
 	return &SiteMapper{
 		Url:                   url,
 		Depth:                 0,
 		MaxDepth:              maxDepth,
 		Pool:                  pool,
 		Result:                resultChannel,
-		expectedLeavesCounter: make(chan int),
-		leafCounter:           make(chan int),
+
+		node: make(chan int32),
 	}
 }
 
-func newTaskFromSiteMapper(url string, depth uint, sm *SiteMapper) *SiteMapper {
+func newTaskFromSiteMapper(url *url.URL, depth uint, sm *SiteMapper) *SiteMapper {
 	return &SiteMapper{
 		Url:                   url,
 		Depth:                 depth,
 		MaxDepth:              sm.MaxDepth,
 		Pool:                  sm.Pool,
 		Result:                sm.Result,
-		expectedLeavesCounter: sm.expectedLeavesCounter,
-		leafCounter:           sm.leafCounter,
+
+		node: sm.node,
 	}
 }
 
-func (sm *SiteMapper) Execute() {
-	fmt.Printf("GET: %s", sm.Url)
-	p, err := http.Get(sm.Url)
+func (sm *SiteMapper) Execute(r uint) {
+	sm.node <- 1
 
-	fmt.Println("Success")
+	defer func() {
+		sm.node <- -1
+	}()
+
+	//fmt.Printf("GET: %s\n", sm.Url)
+
+	p, err := http.Get(sm.Url.String())
+
 	if err != nil {
 		fmt.Println(err.Error())
+		return
+	}
 
+	// Pass current url to the results channel
+	sm.Result <- Url{p.Request.URL.String()}
+
+	if sm.Depth >= sm.MaxDepth {
 		return
 	}
 
 	links := parser.GetLinks(*p)
 
-	if sm.Depth == sm.MaxDepth - 1 {
-		fmt.Printf("Expecting %d leaves", len(links))
-		sm.expectedLeavesCounter <- len(links)
-	}
-
 	for _, l := range links {
-		sm.Result <- Url{l}
-
-		if sm.Depth < sm.MaxDepth {
-			sm.Pool.Queue(newTaskFromSiteMapper(l, sm.Depth + 1, sm))
+		fmt.Println(l.String())
+		if isHost(p.Request.URL.Host, l.Host) {
+			fmt.Printf("Not on host: %s, %s\n", l.String(), p.Request.URL.Host)
 			continue
 		}
 
-		sm.leafCounter <- 1
+		task := newTaskFromSiteMapper(l, sm.Depth + 1, sm)
+
+		err = sm.Pool.Queue(task)
+
+		if err != nil {
+			fmt.Println("Pool is starving.")
+			task.Execute(r)
+		}
 	}
 }
 
 func (sm *SiteMapper) Wait() []Url {
 	start := time.Now()
 
+	var visited = make(map[string]int)
+
 	var results []Url
 
-	expectedLeaves := 0
-	leaves := 0
+	var nodes int32
 
-	isStart := true
+	isStart := false
 
 	for {
-		if !isStart && expectedLeaves == leaves {
+		if time.Now().Sub(start) > time.Second * 10 {
 			return results
 		}
 
-		if time.Now().After(start.Add(time.Second * 10)) {
+		if isStart && nodes == 0 {
 			return results
 		}
 
 		select {
-		case url := <-sm.Result:
-			fmt.Println("Append result")
-			results = append(results, url)
-		case n := <- sm.expectedLeavesCounter:
-			fmt.Println("Expect leaves")
-			expectedLeaves += n
-		case n := <- sm.leafCounter:
-			fmt.Println("Add leaves")
-			isStart = false
-			leaves += n
+		case u := <-sm.Result:
+			if visited[u.Loc] == 0 {
+				visited[u.Loc] += 1
+				results = append(results, u)
+			}
+
+			break
+		case n := <- sm.node:
+			isStart = true
+			atomic.AddInt32(&nodes, n)
 		}
 	}
+}
+
+func isHost(h string, c string) bool {
+	splitHost := strings.Split(h, ".")
+
+	h = fmt.Sprintf("%s.%s", splitHost[len(splitHost)-2], splitHost[len(splitHost)-1])
+
+	return h == c
 }

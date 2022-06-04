@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"regexp"
 )
 
@@ -12,7 +14,7 @@ const(
 	REGEX_ANCHOR_URL = `<a.*?href="(.*?)"`
 )
 
-func GetLinks(page http.Response) []string {
+func GetLinks(page http.Response) []*url.URL {
 	body := page.Body
 
 	defer body.Close()
@@ -23,22 +25,48 @@ func GetLinks(page http.Response) []string {
 		return nil
 	}
 
+	anchorUrls := extractRegexp(string(s), REGEX_ANCHOR_URL)
 	baseUrl := extractRegexp(string(s),REGEX_BASE_URL)
 
-	anchorUrls := extractRegexp(string(s), REGEX_ANCHOR_URL)
-
-	var valid []string
+	var valid []*url.URL
 
 	for _, a := range anchorUrls {
-		if !isFullUrl(a) {
-			if len(baseUrl) > 0 {
-				valid = append(valid, fmt.Sprintf("%s%s", baseUrl[0], a))
+		var u = &url.URL{}
+		var err error
+
+		if isFullUrl(a) {
+			u, err = url.Parse(a)
+
+			if err != nil {
+				fmt.Println(err.Error())
+				continue
 			}
 
+			valid = append(valid, u)
 			continue
 		}
 
-		valid = append(valid, a)
+		if len(baseUrl) > 0 {
+			b, err := url.Parse(baseUrl[0])
+
+			if err != nil {
+				fmt.Println(err.Error())
+				continue
+			}
+
+			u.Scheme = b.Scheme
+			u.Host = b.Host
+			u.Path = path.Join(b.Path, a)
+
+			valid = append(valid, u)
+			continue
+		}
+
+		u.Scheme = page.Request.URL.Scheme
+		u.Host = page.Request.URL.Host
+		u.Path = path.Join(page.Request.URL.Path, a)
+
+		valid = append(valid, u)
 	}
 
 	return valid
